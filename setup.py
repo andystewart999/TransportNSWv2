@@ -4,17 +4,17 @@ with open("README.md", "r") as fh:
     long_description = fh.read()
 
 setuptools.setup(
-    name="PyTransportNSWv2",
-    version="0.4.0",
+    name="pytransportnswv2",
+    version="2.0.9",
     author="andystewart999",
+    author_email="andy.stewart@live.com",
     description="Get detailed per-trip transport information from TransportNSW",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/andystewart999/TransportNSW",
+    url="https://github.com/andystewart999/TransportNSWv2",
     packages=setuptools.find_packages(),
     install_requires=[
-        'gtfs-realtime-bindings',
-        'requests'
+        'gtfs-realtime-bindings'
     ],
     classifiers=[
         "Programming Language :: Python :: 3",
