@@ -12,6 +12,19 @@ import re
 import json                                     #For the output
 import time
 
+# Global API variable
+api_calls = 0
+
+def reset_api_counter():
+    global api_calls
+    api_calls = 0
+
+def increment_api_counter(source):
+    global api_calls
+    api_calls += 1
+    #print(str(api_calls) + " " + source)
+
+# Constants
 ATTR_DUE_IN = 'due'
 
 ATTR_ORIGIN_STOP_ID = 'origin_stop_id'
@@ -27,20 +40,29 @@ ATTR_ORIGIN_TRANSPORT_TYPE = 'origin_transport_type'
 ATTR_ORIGIN_TRANSPORT_NAME = 'origin_transport_name'
 ATTR_ORIGIN_LINE_NAME = 'origin_line_name'
 ATTR_ORIGIN_LINE_NAME_SHORT = 'origin_line_name_short'
+ATTR_DESTINATION_TRANSPORT_TYPE = 'destination_transport_type'
+ATTR_DESTINATION_TRANSPORT_NAME = 'destination_transport_name'
+ATTR_DESTINATION_LINE_NAME = 'destination_line_name'
+ATTR_DESTINATION_LINE_NAME_SHORT = 'destination_line_name_short'
+
 ATTR_CHANGES = 'changes'
+ATTR_CHANGES_LIST = 'changes_list'
 
-ATTR_OCCUPANCY = 'occupancy'
+ATTR_ORIGIN_OCCUPANCY = 'origin_occupancy'
+ATTR_DESTINATION_OCCUPANCY = 'destination_occupancy'
 
-ATTR_AVMS_TRIP_ID = 'avms_trip_id'
-ATTR_REAL_TIME_TRIP_ID = 'real_time_trip_id'
-ATTR_LATITUDE = 'latitude'
-ATTR_LONGITUDE = 'longitude'
-ATTR_GTFS_URI = 'gtfs_uri'
+ATTR_ORIGIN_REAL_TIME_TRIP_ID = 'origin_real_time_trip_id'
+ATTR_DESTINATION_REAL_TIME_TRIP_ID = 'destination_real_time_trip_id'
+ATTR_ORIGIN_LATITUDE = 'origin_latitude'
+ATTR_ORIGIN_LONGITUDE = 'origin_longitude'
+ATTR_DESTINATION_LATITUDE = 'destination_latitude'
+ATTR_DESTINATION_LONGITUDE = 'destination_longitude'
+
 ATTR_ALERTS = 'alerts'
 
 logger = logging.getLogger(__name__)
 
-class Journeys(object):
+class TransportNSWv2(object):
     """The Class for handling the data retrieval."""
 
     # The application requires an API key. You can register for
@@ -62,16 +84,25 @@ class Journeys(object):
             ATTR_ORIGIN_TRANSPORT_NAME : 'n/a',
             ATTR_ORIGIN_LINE_NAME : 'n/a',
             ATTR_ORIGIN_LINE_NAME_SHORT : 'n/a',
+            ATTR_DESTINATION_TRANSPORT_TYPE : 'n/a',
+            ATTR_DESTINATION_TRANSPORT_NAME : 'n/a',
+            ATTR_DESTINATION_LINE_NAME : 'n/a',
+            ATTR_DESTINATION_LINE_NAME_SHORT : 'n/a',
             ATTR_CHANGES : 'n/a',
-            ATTR_OCCUPANCY : 'n/a',
-            ATTR_REAL_TIME_TRIP_ID : 'n/a',
-            ATTR_LATITUDE : 'n/a',
-            ATTR_LONGITUDE : 'n/a',
+            ATTR_CHANGES_LIST: [],
+            ATTR_ORIGIN_OCCUPANCY: 'n/a',
+            ATTR_DESTINATION_OCCUPANCY: 'n/a',
+            ATTR_ORIGIN_REAL_TIME_TRIP_ID : 'n/a',
+            ATTR_ORIGIN_LATITUDE : 'n/a',
+            ATTR_ORIGIN_LONGITUDE : 'n/a',
+            ATTR_DESTINATION_REAL_TIME_TRIP_ID : 'n/a',
+            ATTR_DESTINATION_LATITUDE : 'n/a',
+            ATTR_DESTINATION_LONGITUDE : 'n/a',
             ATTR_ALERTS: '[]'
             }
 
 
-    def check_stops(self, api_key, stops, home_assistant = False):
+    def check_stops(self, api_key, stops):
         # Check the list of stops and return a JSON array of the stop details, plus if all the checked stops existed
         # Return a JSON array of the results
 
@@ -88,20 +119,25 @@ class Journeys(object):
         stop_list = []
         skip_api_calls = False
 
-        for stop in stops:
-            url = \
-                'https://api.transport.nsw.gov.au/v1/tp/stop_finder?' \
-                'outputFormat=rapidJSON&coordOutputFormat=EPSG%3A4326' \
-                '&type_sf=stop&name_sf=' + stop + \
-                '&TfNSWSF=true'
 
-            # Send the query
-            try:
-                url = 'https://api.transport.nsw.gov.au/v1/tp/stop_finder?outputFormat=rapidJSON&coordOutputFormat=EPSG%3A4326&type_sf=stop&name_sf=' + stop + '&TfNSWSF=true'
+        try:
+            for stop in stops:
+                # Make an educated guess about what the data is that we've been sent - assume the worst
+                type_sf = 'any'
+
+                # If the data is numeric then it's a stop ID.  Some bus stops have a 'G' at the beginning so cater for that also
+                if stop[1:].isnumeric():
+                    type_sf = 'stop'
+
+                # Send the query
+                url = 'https://api.transport.nsw.gov.au/v1/tp/stop_finder?outputFormat=rapidJSON&coordOutputFormat=EPSG%3A4326&type_sf=' + type_sf + '&name_sf=' + str(stop) + '&TfNSWSF=true'
                 error_code = 0
 
                 if not skip_api_calls:
+                    # Make the call and increment the API counter
                     response = requests.get(url, headers=header, timeout=5)
+                    increment_api_counter('stop_finder')
+
                 else:
                     # An earlier call resulted in an API key error so no point trying again
                     response.status_code = 401
@@ -110,7 +146,7 @@ class Journeys(object):
                 if response.status_code != 200:
                     # We can't be sure that all the stops are valid
                     error_code = response.status_code
-                    stop_detail = []
+                    stop_response = []
 
                     if response.status_code == 401:
                         raise InvalidAPIKey("Invalid API key")
@@ -118,59 +154,86 @@ class Journeys(object):
                     elif response.status_code == 403 or response.status_code == 429:
                         raise APIRateLimitExceeded("API rate limit exceeded")
 
-                    else:
-                        raise StopError("Unknown")
-
                 else:
                     # Parse the result as a JSON object
-                    stop_detail = response.json()
+                    stop_response = response.json()
+                    stop_warning = False
 
                     # Just a quick check - the presence of systemMessages signifies an error, otherwise we assume it's ok
-                    if 'systemMessages' in stop_detail:
-                        error_text = stop_detail['systemMessages'][0]['text']
-                        raise StopError(f"{error_text}", stop)
+                    if 'systemMessages' in stop_response:
+                        stop_warning = True
+                        error_code = stop_response['systemMessages'][0]['code']
 
                     # Put in a pause here to try and make sure we stay under the 5 API calls/second limit
                     # Not usually an issue but if multiple processes are running multiple calls we might hit it
                     time.sleep(1.0)
 
-            except Exception as ex:
-                raise StopError(f"Error '{ex}' calling stop finder API for stop ID {stop}", stop)
-
-            finally:
                 # Append the results to the JSON output - only return the 'isBest' location entry if there's more than one
-                if stop_detail != []:
-                    stop_valid = True
-                    for location in stop_detail['locations']:
+                if stop_response != []:
+                    # We want a positive indicator that this is a valid stop
+                    stop_valid = False
+                    stop_detail = []
+
+                    for location in stop_response['locations']:
                         if location['isBest']:
-                            stop_detail = location
-                            break
+                            # Make sure it's a stop ID we can use
+                            actual_stop_id = location['id']
+                            if actual_stop_id[1:].isnumeric():
+                                # We can use this
+                                stop_detail = location
+                                stop_valid = True
+                                stop = actual_stop_id
+                                break
+
+                    if not stop_valid:
+                        all_stops_valid = False
 
                 else:
                     stop_valid = False
                     all_stops_valid = False
+                    stop_detail = []
 
                 #Add it to the list
-                data = {"stop_id": stop, "valid": stop_valid, "error_code": error_code, "stop_detail": stop_detail}
+                data = {"stop_id": stop, "valid": stop_valid, "warning": stop_warning, "error_code": error_code, "stop_detail": stop_detail}
                 stop_list.append (data)
 
-        # Complete the JSON output and return it
-        data = {"all_stops_valid": all_stops_valid, "stop_list": stop_list}
-        #return json.dumps(data)
-        return data
+            # Complete the JSON output and return it
+            data = {"all_stops_valid": all_stops_valid, "stop_list": stop_list}
+
+            return json.dumps(data)
+
+        except InvalidAPIKey as ex:
+            raise InvalidAPIKey (f"Invalid API key {api_key}")
+
+        except StopError as ex:
+            raise StopError (f"Error '{ex}' calling stop finder API for stop ID {stop}")
+
+        except Exception as ex:
+            raise StopError(f"Error '{ex}' calling stop finder API for stop ID {stop}", stop)
 
 
-    def get_trip(self, name_origin, name_destination , api_key, journey_wait_time = 0, transport_type = 0, \
+    def get_trip(self, name_origin, name_destination , api_key, journey_wait_time = 0, origin_transport_type = [0], destination_transport_type = [0], \
                  strict_transport_type = False, raw_output = False, journeys_to_return = 1, route_filter = '', \
-                 include_realtime_location = True, include_alerts = 'none', alert_type = 'all', check_stop_ids = True, forced_gtfs_uri = [],
-                 home_assistant = False):
+                 include_realtime_location = True, include_alerts = 'none', alert_type = ['all'], check_stop_ids = True):
 
         """Get the latest data from Transport NSW."""
         fmt = '%Y-%m-%dT%H:%M:%SZ'
+        reset_api_counter()
 
         route_filter = route_filter.lower()
         include_alerts = include_alerts.lower()
-        alert_type = alert_type.lower()
+
+        # Sanity checking - convert any single-instance variables to lists
+        if isinstance(origin_transport_type, int):
+            origin_transport_type = [origin_transport_type]
+
+        if isinstance(destination_transport_type, int):
+            destination_transport_type = [destination_transport_type]
+
+        if isinstance(alert_type, str):
+            alert_type = alert_type.split('|')
+
+        alert_type = [alert.lower() for alert in alert_type]
 
         # This query always uses the current date and time - but add in any 'journey_wait_time' minutes
         now_plus_wait = datetime.now() + timedelta(minutes = journey_wait_time)
@@ -188,13 +251,13 @@ class Journeys(object):
             if not data['all_stops_valid']:
                 # One or both of those stops was invalid - log an error and exit
                 stop_error = ""
+
                 for stop in data['stop_list']:
                     if not stop['valid']:
                         stop_error += stop['stop_id']+ ", "
 
-                #logger.error(f"Stop ID(s) {stop_error[:-2]} do not exist - exiting")
                 raise StopError (f"Stop ID(s) {stop_error[:-2]} do not exist", stop_error)
-                #return None
+
 
         # We don't control how many journeys are returned any more, so need to be careful of running out of valid journeys if there is a filter in place, particularly a strict filter
         # It would be more efficient to return one journey, check if the filter is met and then retrieve the next one via a new query if not, but for now we'll only be making use of the journeys we've been given
@@ -212,6 +275,7 @@ class Journeys(object):
         # Otherwise store the response for the next steps
         try:
             response = requests.get(url, headers=header, timeout=10)
+            increment_api_counter('trip')
 
         except Exception as ex:
             raise TripError (f"Error '{str(ex)}' calling trip API for journey {name_origin} to {name_destination}")
@@ -226,9 +290,7 @@ class Journeys(object):
                 raise APIRateLimitExceeded("Error 'API rate limit exceeded' calling trip API for journey {name_origin} to {name_destination}")
 
             else:
-                raise TripError(f"Error '{str(response.status_cude)}' calling trip API for journey {name_origin} to {name_destination}")
-
-            return None
+                raise TripError(f"Error '{str(response.status_code)}' calling trip API for journey {name_origin} to {name_destination}")
 
         result = response.json()
 
@@ -256,28 +318,23 @@ class Journeys(object):
 
         for current_journey_index in range (0, retrieved_journeys, 1):
             # Look for a trip with a matching transport type filter in at least one of its legs.  Either ANY, or the first leg, depending on how strict we're being
-            journey, next_journey_index = self._find_next_journey(result['journeys'], current_journey_index, transport_type, strict_transport_type, route_filter)
+            legs, next_journey_index, first_leg, last_leg, changes, changes_list = self._find_next_journey(result['journeys'], current_journey_index, origin_transport_type, destination_transport_type, strict_transport_type, route_filter)
 
-            if ((journey is None) or (journey['legs']) is None):
+            if legs is None:
+                # An empty journey that didn't meet the criteria - which means all the valid journeys have been found already
                 pass
             else:
-                legs = journey['legs']
-                first_leg = self._find_first_leg(legs, transport_type, strict_transport_type, route_filter)
-
-                #Executive decision - don't be strict on the last leg, there's often some walking (transport type 100) involved.
-                last_leg = self._find_last_leg(legs, transport_type, False)
-                changes = self._find_changes(legs, transport_type)
-
-                origin = first_leg['origin']
-                first_stop = first_leg['destination']
-                destination = last_leg['destination']
-                transportation = first_leg['transportation']
+                origin_leg = first_leg['origin']
+                origin_stop = first_leg['destination']
+                destination_stop = last_leg['destination']
+                origin_transportation = first_leg['transportation']
+                destination_transportation = last_leg['transportation']
 
                 # Origin info
-                origin_stop_id = origin['id']
-                origin_name = origin['name']
-                origin_departure_time = origin['departureTimeEstimated']
-                origin_departure_time_planned = origin['departureTimePlanned']
+                origin_stop_id = origin_leg['id']
+                origin_name = origin_leg['name']
+                origin_departure_time = origin_leg['departureTimeEstimated']
+                origin_departure_time_planned = origin_leg['departureTimePlanned']
 
                 t1 = datetime.strptime(origin_departure_time, fmt).timestamp()
                 t2 = datetime.strptime(origin_departure_time_planned, fmt).timestamp()
@@ -287,40 +344,62 @@ class Journeys(object):
                 due = self._get_due(datetime.strptime(origin_departure_time, fmt))
 
                 # Destination info
-                destination_stop_id = destination['id']
-                destination_name = destination['name']
-                destination_arrival_time = destination['arrivalTimeEstimated']
+                destination_stop_id = destination_stop['id']
+                destination_name = destination_stop['name']
+                destination_arrival_time = destination_stop['arrivalTimeEstimated']
 
                 # Origin type info - train, bus, etc
-                origin_mode = self._get_mode(transportation['product']['class'])
-                origin_mode_name = transportation['product']['name']
+                origin_mode = self._get_mode(origin_transportation['product']['class'])
+                origin_mode_name = origin_transportation['product']['name']
+
+                # Destination type info - train, bus, etc
+                destination_mode = self._get_mode(destination_transportation['product']['class'])
+                destination_mode_name = destination_transportation['product']['name']
 
                 # RealTimeTripID info so we can try and get the current location later
-                realtimetripid = 'n/a'
-                if 'properties' in transportation and 'RealtimeTripId' in transportation['properties']:
-                    realtimetripid = transportation['properties']['RealtimeTripId']
+                origin_realtimetripid = 'n/a'
+                origin_agencyid = ''
+                destination_realtimetripid = 'n/a'
+                destination_agencyid = ''
 
-                    # We're also going to need the agency_id if it's a bus journey
-                    agencyid = transportation['operator']['id']
+                if origin_mode != 'Walk':
+                    if 'properties' in origin_transportation and 'RealtimeTripId' in origin_transportation['properties']:
+                        origin_realtimetripid = origin_transportation['properties']['RealtimeTripId']
+                        origin_agencyid = origin_transportation['operator']['id']
 
-                # AVMSTripID is for Home Assistant, if needed
-                avmstripid = 'n/a'
-                if 'properties' in transportation and 'AVMSTripID' in transportation['properties']:
-                    avmstripid = transportation['properties']['AVMSTripID']
+                if destination_mode != 'Walk':
+                    if 'properties' in destination_transportation and 'RealtimeTripId' in destination_transportation['properties']:
+                        destination_realtimetripid = destination_transportation['properties']['RealtimeTripId']
+                        destination_agencyid = destination_transportation['operator']['id']
 
                 # Line info
-                origin_line_name_short = "unknown"
-                if 'disassembledName' in transportation:
-                    origin_line_name_short = transportation['disassembledName']
+                origin_line_name_short = 'n/a'
+                if 'disassembledName' in origin_transportation:
+                    origin_line_name_short = origin_transportation['disassembledName']
 
-                origin_line_name = "unknown"
-                if 'number' in transportation:
-                    origin_line_name = transportation['number']
+                origin_line_name = 'n/a'
+                if 'number' in origin_transportation:
+                    origin_line_name = origin_transportation['number']
+
+                destination_line_name_short = 'n/a'
+                if 'disassembledName' in destination_transportation:
+                    destination_line_name_short = destination_transportation['disassembledName']
+
+                destination_line_name = 'n/a'
+                if 'number' in destination_transportation:
+                    destination_line_name = destination_transportation['number']
 
                 # Occupancy info, if it's there
-                occupancy = 'unknown'
-                if 'properties' in first_stop and 'occupancy' in first_stop['properties']:
-                    occupancy = first_stop['properties']['occupancy']
+                origin_occupancy = 'n/a'
+                destination_occupancy = 'n/a'
+
+                if origin_mode != 'Walk':
+                    if 'properties' in origin_stop and 'occupancy' in origin_stop['properties']:
+                        origin_occupancy = origin_stop['properties']['occupancy']
+
+                if destination_mode != 'Walk':
+                    if 'properties' in destination_stop and 'occupancy' in destination_stop['properties']:
+                        destination_occupancy = destination_stop['properties']['occupancy']
 
                 alerts = "[]"
                 if include_alerts != 'none':
@@ -328,63 +407,17 @@ class Journeys(object):
                     # Only include alerts of the specified priority or greater, and of the specified type
                     alerts = self._find_alerts(legs, include_alerts, alert_type)
 
-                latitude = 'n/a'
-                longitude = 'n/a'
-                mode_url = 'n/a'
+                origin_latitude = 'n/a'
+                origin_longitude = 'n/a'
+                destination_latitude = 'n/a'
+                destination_longitude = 'n/a'
 
-                if include_realtime_location and realtimetripid != 'n/a':
-                    # See if we can get the latitute and longitude via the Realtime Vehicle Positions API
-                    # Build the URL(s) - some modes have multiple GTFS sources, unforunately
-                    # Some travel modes require brute-forcing the API call a few times, so if we're sure of the URI,
-                    # ie it's been determined elsewhere then it can be forced
+                if include_realtime_location and origin_realtimetripid != 'n/a':
+                    origin_latitude, origin_longitude = self._find_location(api_key, origin_mode, origin_realtimetripid, origin_agencyid)
 
-                    bFoundTripID = False
-                    url_base_path = self._get_base_url(origin_mode)
+                if include_realtime_location and destination_realtimetripid != 'n/a':
+                    destination_latitude, destination_longitude = self._find_location(api_key, destination_mode, destination_realtimetripid, destination_agencyid)
 
-                    # Check for a forced URI
-                    if not forced_gtfs_uri:
-                        url_mode_list = self._get_mode_list(origin_mode, agencyid)
-                    else:
-                        # We've been forced to use a specific URI!
-                        url_mode_list = forced_gtfs_uri
-
-                    if not url_mode_list is None:
-                        for mode_url in url_mode_list:
-                            url = url_base_path + mode_url
-                            response = requests.get(url, headers=header, timeout=10)
-
-                            # Only try and process the results if we got a good return code
-                            if response.status_code == 200:
-                                # Search the feed and see if we can match realtimetripid to trip_id
-                                # If we do, capture the latitude and longitude
-                                feed = gtfs_realtime_pb2.FeedMessage()
-                                feed.ParseFromString(response.content)
-                                reg = re.compile(realtimetripid)
-
-                                for entity in feed.entity:
-                                    if bool(re.match(reg, entity.vehicle.trip.trip_id)):
-                                        latitude = entity.vehicle.position.latitude
-                                        longitude = entity.vehicle.position.longitude
-
-                                        # We found it, so flag it and break out
-                                        bFoundTripID = True
-                                        break
-                            else:
-                                # Warn that we didn't get a good return
-                                if response.status_code == 401:
-                                    logger.error(f"Error 'Invalid API key' calling {url} API")
-                                elif response.status_code == 403 or response.status_code == 429:
-                                    logger.error(f"Error 'API rate limit exceded' calling {url} API")
-                                else:
-                                    logger.error(f"Error '{str(response.status_code)}' calling {url} API")
-
-                            if bFoundTripID == True:
-                                # No need to look any further
-                                break
-
-                            # Put in a quick pause here to try and make sure we stay under the 5 API calls/second limit
-                            # Not usually an issue but if multiple processes are running multiple calls we might hit it
-                            time.sleep(0.75)
 
                 self.info = {
                     ATTR_DUE_IN: due,
@@ -399,19 +432,22 @@ class Journeys(object):
                     ATTR_ORIGIN_TRANSPORT_NAME: origin_mode_name,
                     ATTR_ORIGIN_LINE_NAME : origin_line_name,
                     ATTR_ORIGIN_LINE_NAME_SHORT : origin_line_name_short,
+                    ATTR_DESTINATION_TRANSPORT_TYPE : destination_mode,
+                    ATTR_DESTINATION_TRANSPORT_NAME: destination_mode_name,
+                    ATTR_DESTINATION_LINE_NAME : destination_line_name,
+                    ATTR_DESTINATION_LINE_NAME_SHORT : destination_line_name_short,
                     ATTR_CHANGES: changes,
-                    ATTR_OCCUPANCY : occupancy,
-                    ATTR_REAL_TIME_TRIP_ID : realtimetripid,
-                    ATTR_GTFS_URI: mode_url,
-                    ATTR_LATITUDE : latitude,
-                    ATTR_LONGITUDE : longitude,
+                    ATTR_CHANGES_LIST: changes_list,
+                    ATTR_ORIGIN_OCCUPANCY: origin_occupancy,
+                    ATTR_DESTINATION_OCCUPANCY: destination_occupancy,
+                    ATTR_ORIGIN_REAL_TIME_TRIP_ID: origin_realtimetripid,
+                    ATTR_DESTINATION_REAL_TIME_TRIP_ID: destination_realtimetripid,
+                    ATTR_ORIGIN_LATITUDE: origin_latitude,
+                    ATTR_ORIGIN_LONGITUDE: origin_longitude,
+                    ATTR_DESTINATION_LATITUDE: destination_latitude,
+                    ATTR_DESTINATION_LONGITUDE: destination_longitude,
                     ATTR_ALERTS: json.loads(alerts)
                     }
-
-                if home_assistant:
-                    self.info.update (
-                        {ATTR_AVMS_TRIP_ID: avmstripid}
-                    )
 
                 found_journeys = found_journeys + 1
 
@@ -429,122 +465,203 @@ class Journeys(object):
 
                 current_journey_index = next_journey_index
 
-        json_output='{"journeys_to_return": ' + str(journeys_to_return) + ', "journeys_with_data": ' + str(found_journeys) + ', "journeys": [' + json_output + ']}'
+        json_output='{"journeys_to_return": ' + str(journeys_to_return) + ', "journeys_with_data": ' + str(found_journeys) + ', "api_calls": '  + str(api_calls) + ', "journeys": [' + json_output + ']}'
         return json_output
 
 
-    def _find_next_journey(self, journeys, start_journey_index, journeytype, strict, route_filter):
+    def _find_next_journey(self, journeys, start_journey_index, origin_transport_type, destination_transport_type, strict, route_filter):
         # Find the next journey that has a leg of the requested type, and/or that satisfies the route filter
         journey_count = len(journeys)
 
         # Some basic error checking
         if start_journey_index > journey_count:
-            return None, None
+            return None, None, None, None, None
 
         for journey_index in range (start_journey_index, journey_count, 1):
-            leg = self._find_first_leg(journeys[journey_index]['legs'], journeytype, strict, route_filter)
-            if leg is not None:
-                return journeys[journey_index], journey_index + 1
+            journey = journeys[journey_index]
+
+            origin_leg = self._find_first_leg(journey['legs'], origin_transport_type, strict, route_filter)
+
+            if origin_leg is not None:
+                destination_leg = self._find_last_leg(journey['legs'], destination_transport_type, strict)
+
+            if origin_leg is not None and destination_leg is not None:
+                changes, changes_list = self._find_changes(journey['legs'], origin_leg, destination_leg)
+                return journey['legs'], journey_index + 1, origin_leg, destination_leg, changes, changes_list
             else:
-                return None, None
+                return None, None, None, None, None, None
 
         # Hmm, we didn't find one
-        return None, None
+        return None, None, None, None, None, None
 
 
-    def _find_first_leg(self, legs, legtype, strict, route_filter):
+    def _find_first_leg(self, legs, transport_type, strict, route_filter):
         # Find the first leg of the requested type
-        leg_count = len(legs)
-        for leg_index in range (0, leg_count, 1):
+        for leg in legs:
             #First, check against the route filter
             origin_line_name_short = 'n/a'
             origin_line_name = 'n/a'
 
-            if 'transportation' in legs[leg_index] and 'disassembledName' in legs[leg_index]['transportation']:
-                origin_line_name_short = legs[leg_index]['transportation']['disassembledName'].lower()
-                origin_line_name = legs[leg_index]['transportation']['number'].lower()
+            if 'transportation' in leg and 'disassembledName' in leg['transportation']:
+                origin_line_name_short = leg['transportation']['disassembledName'].lower()
+                origin_line_name = leg['transportation']['number'].lower()
 
             if (route_filter in origin_line_name_short or route_filter in origin_line_name):
-                leg_class = legs[leg_index]['transportation']['product']['class']
-                # We've got a filter, and the leg type matches it, so return that leg
-                if legtype != 0 and leg_class == legtype:
-                    return legs[leg_index]
+                # This leg passes the route filter, check it passes any transport type filter as well
+                leg_class = leg['transportation']['product']['class']
 
+                if leg_class in transport_type:
+                    # This leg meets the transport type criteria
+                    return leg
+
+                if 0 in transport_type and leg_class < 99:
                 # We don't have a filter, and this is the first non-walk/cycle leg so return that leg
-                if  legtype == 0 and leg_class < 99:
-                    return legs[leg_index]
+                    return leg
+#                if leg_class not in transport_type and leg_class < 99:
+#                    # The transport type is something other than has been requested, but it isn't walking, so this entire journey is no good
+#                    return None
 
-                # Exit if we're doing strict filtering and we haven't found that type in the first leg
-                if legtype != 0 and strict == True:
+                # Exit if we're doing strict filtering and we haven't found that type in the first leg, which we haven't if we've got this far
+                if strict == True:
                     return None
 
         # Hmm, we didn't find one
         return None
 
-
-    def _find_last_leg(self, legs, legtype, strict):
+    def _find_last_leg(self, legs, transport_type, strict):
         # Find the last leg of the requested type
-        leg_count = len(legs)
-        for leg_index in range (leg_count - 1, -1, -1):
-            leg_class = legs[leg_index]['transportation']['product']['class']
+        for leg in reversed(legs):
+            leg_class = leg['transportation']['product']['class']
 
+            if leg_class in transport_type:
             # We've got a filter, and the leg type matches it, so return that leg
-            if legtype != 0 and leg_class == legtype:
-                return legs[leg_index]
+                return leg
 
+            if 0 in transport_type and leg_class < 99:
             # We don't have a filter, and this is the first non-walk/cycle leg so return that leg
-            if  legtype == 0 and leg_class < 99:
-                return legs[leg_index]
+                return leg
 
-            # Exit if we're doing strict filtering and we haven't found that type in the first leg
-            if legtype != 0 and strict == True:
+            # Exit if we're doing strict filtering and we haven't found that type in the last leg
+            if strict == True:
                 return None
 
         # Hmm, we didn't find one
         return None
 
 
-    def _find_changes(self, legs, legtype):
-        # Find out how often we have to change
+    def _find_changes(self, legs, origin_leg, destination_leg):
+        # Find out how often we have to change.  Immediately return 0 if the origin and destination legs are the same
+        changes_list = []
+        if origin_leg == destination_leg:
+            return 0, changes_list
+
+        # Count the changes, each time we hit new non-walking leg is considered to be a change
         changes = 0
-        leg_count = len(legs)
+        last_change =''
+        bInJourney = False
 
-        for leg_index in range (0, leg_count, 1):
-            leg_class = legs[leg_index]['transportation']['product']['class']
-            if leg_class == legtype or legtype == 0:
-                changes = changes + 1
+        for leg in legs:
+            if leg == origin_leg:
+                # We're in the journey so start capturing changes
+                bInJourney = True
 
-        return changes - 1
+                # Capture the destination, it's the first change.  From now on we capture both the origin and the destination until we hit the final leg, in which we only capture the origin
+                last_change = leg['destination']['disassembledName']
+                changes_list.append(last_change)
+
+            elif bInJourney:
+                leg_class = leg['transportation']['product']['class']
+                if leg_class < 99:
+                    changes += 1
+
+                    # Also capture the origin and destination as a change, unless it's the same platform or stop as the last one
+                    new_change_origin = leg['origin']['disassembledName']
+                    new_change_destination = leg['destination']['disassembledName']
+
+                    if new_change_origin != last_change:
+                        changes_list.append(new_change_origin)
+
+                        if leg != destination_leg:
+                            changes_list.append(new_change_destination)
+                            last_change = new_change_destination
+
+            if leg == destination_leg:
+                # We've finished looking for changes
+                return changes, changes_list
+
+        # We should never get here!
+        return 999, {}
 
 
     def _find_alerts(self, legs, priority_filter, alert_type):
         # Return an array of all the alerts on this trip that meet the priority level and alert type
-        leg_count = len(legs)
         found_alerts = []
         priority_minimum = self._get_alert_priority(priority_filter)
-        alert_list = alert_type.split("|")
 
-        for leg_index in range (0, leg_count, 1):
-            current_leg = legs[leg_index]
-            if 'infos' in current_leg:
-                alerts = current_leg['infos']
-                for alert in alerts:
+        for leg in legs:
+            if 'infos' in leg:
+                for alert in leg['infos']:
                     if (self._get_alert_priority(alert['priority'])) >= priority_minimum:
-                        if (alert_type == 'all') or (alert['type'].lower() in alert_list):
+                        if ('all' in alert_type) or (alert['type'].lower() in alert_type):
                             found_alerts.append (alert)
 
         return json.dumps(found_alerts)
 
 
-    def _find_hints(self, legs, legtype, priority):
-        # Return an array of all the hints on this trip that meet the priority type
-        leg_count = len(legs)
+    def _find_location(self, api_key, mode, realtimetripid, agencyid):
+        # See if we can get the latitude and longitude via the Realtime Vehicle Positions API
+        # Build the URL(s) - some modes have multiple GTFS sources, unforunately
 
-        for leg_index in range (0, leg_count, 1):
-            current_leg = legs[leg_index]
-            leg_class = current_leg['transportation']['product']['class']
-            if 'hints' in current_leg:
-                hints = current_leg['hints']
+        bFoundTripID = False
+        latitude = 'n/a'
+        longitude = 'n/a'
+
+        auth = 'apikey ' + api_key
+        header = {'Accept': 'application/json', 'Authorization': auth}
+
+        url_base_path = self._get_base_url(mode)
+        url_mode_list = self._get_mode_list(mode, agencyid)
+
+        if not url_mode_list is None:
+            for mode_url in url_mode_list:
+                url = url_base_path + mode_url
+                response = requests.get(url, headers=header, timeout=10)
+                increment_api_counter(url)
+
+                # Only try and process the results if we got a good return code
+                if response.status_code == 200:
+                    # Search the feed and see if we can match realtimetripid to trip_id
+                    # If we do, capture the latitude and longitude
+                    feed = gtfs_realtime_pb2.FeedMessage()
+                    feed.ParseFromString(response.content)
+                    reg = re.compile(realtimetripid)
+
+                    for entity in feed.entity:
+                        if bool(re.match(reg, entity.vehicle.trip.trip_id)):
+                            latitude = entity.vehicle.position.latitude
+                            longitude = entity.vehicle.position.longitude
+
+                            # We found it, so flag it and break out
+                            bFoundTripID = True
+                            break
+                else:
+                    # Warn that we didn't get a good return
+                    if response.status_code == 401:
+                        logger.error(f"Error 'Invalid API key' calling {url} API")
+                    elif response.status_code == 403 or response.status_code == 429:
+                        logger.error(f"Error 'API rate limit exceded' calling {url} API")
+                    else:
+                        logger.error(f"Error '{str(response.status_code)}' calling {url} API")
+
+                if bFoundTripID == True:
+                    # No need to look any further
+                    break
+
+                # Put in a quick pause here to try and make sure we stay under the 5 API calls/second limit
+                # Not usually an issue but if multiple processes are running multiple calls we might hit it
+                time.sleep(0.75)
+
+        return latitude, longitude
 
 
     def _get_mode(self, iconId):
@@ -559,7 +676,7 @@ class Journeys(object):
             11  : "School bus",
             99  : "Walk",
             100 : "Walk",
-            107 : "Cycle"
+            107 : "Cycle",
         }
 
         return modes.get(iconId, None)
@@ -665,9 +782,6 @@ class StopError(Exception):
     def __init__(self, message = "", stop_detail = ""):
         super().__init__(message)
         self.stop_detail = stop_detail
-
-#    def __str__(self):
-#        return f"{self.message}"
 
 class TripError(Exception):
     """" Trip-finder related error """
