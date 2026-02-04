@@ -370,9 +370,9 @@ class TransportNSWv2(object):
                     # An empty journey that didn't meet the criteria - which means all the valid journeys have been found already
                     # To many changes so ignore this otherwise valid journey
                     pass
-                elif changes > max_changes:
-                    # Too many changes so ignore this otherwise valid journey
-                    pass
+#                elif changes > max_changes:
+#                    # Too many changes so ignore this otherwise valid journey
+#                    pass
                 else:
                     origin_leg = first_leg['origin']
                     origin_stop = first_leg['destination']
