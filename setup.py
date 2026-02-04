@@ -5,7 +5,7 @@ with open("README.md", "r") as fh:
 
 setuptools.setup(
     name="pytransportnswv2",
-    version="2.0.9",
+    version="2.2.5",
     author="andystewart999",
     author_email="andy.stewart@live.com",
     description="Get detailed per-trip transport information from TransportNSW",
